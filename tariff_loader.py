@@ -1,5 +1,5 @@
 """
-tariff_loader.py
+modules/tariff_loader.py
 ----------------
 Lee el diccionario de tarifas desde un Excel y lo convierte en un dict estructurado
 con la forma: {Id: (lim_inf, lim_sup)}
