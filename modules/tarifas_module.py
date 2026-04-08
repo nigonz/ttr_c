@@ -22,121 +22,111 @@ USO:
     tarifas_module.render_tarifas_tab()
 """
 
-import streamlit as st
+ import streamlit as st
 import pandas as pd
 import io
-from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 
-# --- MULTIPLICADORES UNIFICADOS (Claves estandarizadas para evitar KeyError) ---
-MULT = {
-    "CN": 1.00,    # Común Nominal
-    "EN": 1.25,    # Expreso Nominal
-    "EAN": 1.75,   # Expreso Autopista Nominal
-    "CSN": 1.591,  # Común Sin Nominalizar
-    "ESN": 1.988,  # Expreso Sin Nominalizar (1.25 * 1.591)
-    "EASN": 2.784  # Expreso Autopista Sin Nominalizar (1.75 * 1.591)
-}
+# --- MOTOR DE REDONDEO FINANCIERO (2 decimales exactos) ---
+def r(val):
+    """Redondeo donde 0.005 sube a 0.01."""
+    return float(Decimal(str(val)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
-def generar_tarifas_pro(base5, juris):
-    """Genera la estructura total: Secciones, KM, LP, KP, SRSR y KM2."""
+# --- MULTIPLICADORES (Basados en tus constantes 1.75 y 1.59) ---
+def get_mults(juris):
+    # DF usa 1.59, PBA/JN suelen requerir 1.591 para centavos exactos
+    sn_factor = 1.59 if juris == "DF" else 1.591
+    return {
+        "CN": 1.0, 
+        "EN": 1.25, 
+        "EAN": 1.75, # El 1.75 que mencionaste
+        "CSN": sn_factor, # El 1.59 que mencionaste
+        "ESN": 1.25 * sn_factor, 
+        "EASN": 1.75 * sn_factor
+    }
+
+def generar_tarifas_limpias(base5, juris):
     rows = []
     b1 = base5[0]
+    m_map = get_mults(juris)
     
-    # 1. SECCIONES 1-5 (Base y Variantes)
-    suffixes = {"SCN": "CN", "SEN": "EN", "SEAN": "EAN", "SCSN": "CSN", "SESN": "ESN", "SEASN": "EASN"}
-    for i, b in enumerate(base5):
-        for code, m_key in suffixes.items():
-            # Buscamos el multiplicador de forma segura
-            m = MULT.get(m_key, 1.0)
-            val = round(b * m, 2)
-            
-            # Caso especial 1SCN en PBA (rango fijo de tu lista)
-            inf, sup = val, val
-            if juris == "PBA" and i == 0 and code == "SCN":
-                inf, sup = 721.33, 721.84
-                
-            rows.append({"Id": f"{i+1}{code}", "Limite Inferior": inf, "Limite Superior": sup})
-
-    # 2. SERIES 1-4KM (Con el salto de centavos)
-    base_km_val = round(b1 * 1.316, 2)
-    for m_key in ["CN", "EN", "EAN", "CSN", "ESN", "EASN"]:
-        m_val = MULT.get(m_key, 1.0)
-        v_sup = round(base_km_val * m_val, 2)
-        # En PBA, el CN tiene rango, el resto suele ser fijo
-        v_inf = round(v_sup - 0.50, 2) if (juris == "PBA" and m_key == "CN") else v_sup
+    # 1. SECCIONES 1 A 5 (El "corazón" del diccionario)
+    # Generamos por categoría para mantener el orden visual
+    for code, m in m_map.items():
+        # Mapeo de ID según tu estándar (SCN, SEN, SEAN...)
+        id_suffix = code if code.startswith("S") else ("S"+code if "EAN" not in code else "SEAN")
+        if code == "CN": id_suffix = "SCN"
+        if code == "CSN": id_suffix = "SCSN"
         
-        # Primera fila con rango, siguientes 3 fijas (Total 4)
-        rows.append({"Id": f"1-4KM{m_key}", "Limite Inferior": v_inf, "Limite Superior": v_sup})
-        for _ in range(3):
-            rows.append({"Id": f"1-4KM{m_key}", "Limite Inferior": v_sup, "Limite Superior": v_sup})
-
-    # 3. LA PLATA (LP) - Corregido el acceso al diccionario
-    if juris == "PBA":
         for i, b in enumerate(base5):
-            val_lp = round(b * 1.0898, 2)
-            # Solo generamos las 4 básicas de LP
-            for m_key in ["CN", "EN", "CSN", "ESN"]:
-                m_val = MULT.get(m_key, 1.0)
-                v = round(val_lp * m_val, 2)
-                rows.append({"Id": f"{i+1}{m_key}LP", "Limite Inferior": v, "Limite Superior": round(v + 0.01, 2)})
+            val = r(b * m)
+            # Rango especial PBA Sección 1
+            inf, sup = val, val
+            if juris == "PBA" and i == 0 and id_suffix == "SCN":
+                inf, sup = 721.33, 721.84
+            rows.append({"Id": f"{i+1}{id_suffix}", "Limite Inferior": inf, "Limite Superior": sup})
 
-    # 4. RANGOS KP (5KP-9KP)
-    cortes = [round(b1 * 1.706, 2), round(b1 * 2.621, 2), round(b1 * 3.384, 2), 
-              round(b1 * 4.146, 2), round(b1 * 4.909, 2), round(b1 * 7.961, 2)]
-    for m_key in ["CN", "EN", "EAN", "CSN", "ESN", "EASN"]:
-        m_val = MULT.get(m_key, 1.0)
+    # Si es DF, terminamos aquí para no ensuciar el archivo
+    if juris == "DF":
+        return pd.DataFrame(rows)
+
+    # --- LÓGICA PARA PBA Y JN (KMs y KPs) ---
+    # 2. SERIES 1-4KM (4 repeticiones por categoría)
+    base_km = r(b1 * 1.316)
+    for cat_id, m_val in m_map.items():
+        # IDs de KM no llevan la 'S' inicial (1-4KMCN)
+        v_sup = r(base_km * m_val)
+        v_inf = r(v_sup - 0.50) if cat_id == "CN" and juris == "PBA" else v_sup
+        for _ in range(4):
+            rows.append({"Id": f"1-4KM{cat_id}", "Limite Inferior": v_inf, "Limite Superior": v_sup})
+
+    # 3. LA PLATA (LP) - Solo PBA
+    if juris == "PBA":
+        for cat_id in ["CN", "EN", "CSN", "ESN"]:
+            for i, b in enumerate(base5):
+                v = r(b * 1.09 * m_map[cat_id])
+                id_lp = f"{i+1}S{cat_id}LP" if not cat_id.startswith("S") else f"{i+1}{cat_id}LP"
+                rows.append({"Id": id_lp, "Limite Inferior": v, "Limite Superior": r(v + 0.01)})
+
+    # 4. RANGOS KP (5KP a 9KP)
+    cortes = [1.706, 2.621, 3.384, 4.146, 4.909, 7.961]
+    for cat_id, m_val in m_map.items():
         for i in range(5):
-            inf = round(cortes[i] * m_val, 2)
-            sup = round(cortes[i+1] * m_val, 2)
-            rows.append({"Id": f"{i+5}KP{m_key}", "Limite Inferior": inf, "Limite Superior": sup})
-
-    # 5. SEMI-RÁPIDOS (SRSR para PBA / SR para otros)
-    for i, b in enumerate(base5):
-        m_sr = 1.25 * (1.15 if juris == "PBA" else 1.0)
-        v_sr = round(b * m_sr, 2)
-        pref = "SRSR" if juris == "PBA" else "SR"
-        rows.append({"Id": f"{i+1}{pref}N", "Limite Inferior": v_sr, "Limite Superior": v_sr})
-        rows.append({"Id": f"{i+1}{pref}SN", "Limite Inferior": round(v_sr * 1.591, 2), "Limite Superior": round(v_sr * 1.591, 2)})
-
-    # 6. KM2 (Final de la lista)
-    for m_key in ["CN", "CSN", "ESN"]:
-        m_val = MULT.get(m_key, 1.0)
-        v_inf = round(base_km_val * m_val, 2)
-        v_sup = round(cortes[0] * m_val, 2)
-        rows.append({"Id": f"1-4KM{m_key}2", "Limite Inferior": v_inf, "Limite Superior": v_sup})
+            inf = r(b1 * cortes[i] * m_val)
+            sup = r(b1 * cortes[i+1] * m_val)
+            rows.append({"Id": f"{i+5}KP{cat_id}", "Limite Inferior": inf, "Limite Superior": sup})
 
     return pd.DataFrame(rows)
 
 def render_tarifas_tab():
-    st.header("📊 Generador Maestro de Tarifas")
-    juris = st.radio("Jurisdicción Activa", ["DF", "PBA", "JN"], horizontal=True)
+    st.header("📊 Generador de Tarifas TTR")
+    st.info("Redondeo a 2 decimales (Financial Half-Up) con multiplicadores 1.75 y 1.59.")
+
+    juris = st.radio("Jurisdicción", ["DF", "PBA", "JN"], horizontal=True)
     
-    st.markdown("### 1. Carga de Bases (COMUN)")
+    # Valores sugeridos de tus planillas de referencia
+    if juris == "PBA": def_vals = [721.84, 804.12, 866.06, 928.07, 989.64]
+    elif juris == "JN": def_vals = [650.00, 724.09, 779.87, 835.71, 891.16]
+    else: def_vals = [650.11, 722.38, 778.04, 833.73, 891.33]
+
     cols = st.columns(5)
-    # Valores sugeridos para PBA según tu última lista
-    vals_def = [721.84, 804.12, 866.06, 928.07, 989.64] if juris == "PBA" else [650.11, 722.38, 778.04, 833.73, 891.33]
-    
-    base5 = [cols[i].number_input(f"Secc {i+1}", value=vals_def[i], format="%.2f", key=f"b{i}") for i in range(5)]
+    base5 = [cols[i].number_input(f"Secc {i+1}", value=def_vals[i], format="%.2f", key=f"b{i}") for i in range(5)]
 
     if any(base5):
-        try:
-            df_final = generar_tarifas_pro(base5, juris)
-            st.divider()
-            st.success(f"✅ Diccionario {juris} generado: {len(df_final)} registros.")
+        df = generar_tarifas_final = generar_tarifas_limpias(base5, juris)
+        st.success(f"✅ Diccionario {juris} generado correctamente ({len(df)} filas).")
 
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_final.to_excel(writer, index=False, sheet_name='Tarifas')
-            
-            st.download_button(
-                label=f"⬇️ Descargar Excel {juris}",
-                data=output.getvalue(),
-                file_name=f"Tarifas_{juris}_TTR.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Tarifas')
+        
+        st.download_button(
+            label=f"⬇️ Descargar Excel {juris}",
+            data=output.getvalue(),
+            file_name=f"Tarifas_{juris}_TTR_2026.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
 
-            with st.expander("👁️ Ver IDs (Control de Macheo)"):
-                st.dataframe(df_final, use_container_width=True, height=400)
-        except Exception as e:
-            st.error(f"⚠️ Error al generar tarifas: {e}")
+        with st.expander("👁️ Vista Previa (Verificar IDs y Redondeo)"):
+            st.dataframe(df, use_container_width=True, height=400)
