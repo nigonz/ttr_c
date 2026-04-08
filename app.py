@@ -401,25 +401,26 @@ def main():
 
     year, resolucion = sidebar_config()
 
-    # Agregamos "📊 Tarifas" a la lista de nombres
-    tabs = st.tabs(["🏙️ DF", "🌿 PBA", "🚌 JN", "📊 Tarifas", "📖 Ayuda"])
-    
-    with tabs[3]:
+    # Reordenamos la lista: Tarifas ahora es la primera (índice 0)
+    tabs = st.tabs(["📊 Tarifas", "🏙️ DF", "🌿 PBA", "🚌 JN", "📖 Ayuda"])
+
+    # --- ÍNDICE 0: TARIFAS ---
+    with tabs[0]:
         render_tarifas_tab()
 
-    with tabs[0]:
+    # --- ÍNDICE 1: DF ---
+    with tabs[1]:
         tab_df(year, resolucion)
 
-    with tabs[1]:
+    # --- ÍNDICE 2: PBA ---
+    with tabs[2]:
         tab_pba(year, resolucion)
 
-    with tabs[2]:
+    # --- ÍNDICE 3: JN ---
+    with tabs[3]:
         tab_jn(year, resolucion)
 
-    # Nuevo bloque para el módulo de tarifas comerciales
-   
-
-    # La ayuda ahora pasa al índice 4
+    # --- ÍNDICE 4: AYUDA ---
     with tabs[4]:
         tab_ayuda()
 
