@@ -91,10 +91,18 @@ def show_stats(df: pd.DataFrame, label: str):
     with cols[2]:
         if 'Recaudacion_TRSUBE' in df.columns:
             st.metric("Recaudación TRSUBE", f"${df['Recaudacion_TRSUBE'].sum():,.0f}")
+    
+    # ── CAMBIO AQUÍ: Ahora suma la columna CANTIDAD_USOS ────────────────────
     with cols[3]:
-        if 'final_seccion' in df.columns:
-            unclassified = (df['final_seccion'] == 0).sum()
-            st.metric("Sin clasificar (sec=0)", f"{unclassified:,}", delta_color="inverse")
+        if 'final_seccion' in df.columns and 'CANTIDAD_USOS' in df.columns:
+            # Filtramos los que tienen seccion 0 y sumamos sus usos
+            usos_no_clasificados = df[df['final_seccion'] == 0]['CANTIDAD_USOS'].sum()
+            
+            st.metric(
+                "Usos no clasificados (sec=0)", 
+                f"{usos_no_clasificados:,.0f}", 
+                delta_color="inverse"
+            )
 
 
 def sidebar_config():
