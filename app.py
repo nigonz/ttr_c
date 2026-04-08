@@ -404,7 +404,7 @@ def main():
     # Agregamos "📊 Tarifas" a la lista de nombres
     tabs = st.tabs(["🏙️ DF", "🌿 PBA", "🚌 JN", "📊 Tarifas", "📖 Ayuda"])
     
-     with tabs[3]:
+    with tabs[3]:
         render_tarifas_tab()
 
     with tabs[0]:
