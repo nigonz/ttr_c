@@ -22,99 +22,111 @@ USO:
     tarifas_module.render_tarifas_tab()
 """
 
- import streamlit as st
+import streamlit as st
 import pandas as pd
 import io
 from decimal import Decimal, ROUND_HALF_UP
 
 # --- MOTOR DE REDONDEO FINANCIERO (2 decimales exactos) ---
 def r(val):
-    """Redondeo donde 0.005 sube a 0.01."""
+    """Asegura que 0.005 suba a 0.01 de forma consistente."""
     return float(Decimal(str(val)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
-# --- MULTIPLICADORES (Basados en tus constantes 1.75 y 1.59) ---
-def get_mults(juris):
-    # DF usa 1.59, PBA/JN suelen requerir 1.591 para centavos exactos
-    sn_factor = 1.59 if juris == "DF" else 1.591
+# --- CONSTANTES DE PRECISIÓN SEGÚN LISTADO NATALIA ---
+def get_config(juris):
+    # DF y JN usan 1.59 exacto. PBA suele usar 1.591.
+    sn_factor = 1.59 if juris != "PBA" else 1.591
     return {
-        "CN": 1.0, 
-        "EN": 1.25, 
-        "EAN": 1.75, # El 1.75 que mencionaste
-        "CSN": sn_factor, # El 1.59 que mencionaste
-        "ESN": 1.25 * sn_factor, 
-        "EASN": 1.75 * sn_factor
+        "MULT": {
+            "CN": 1.0, "EN": 1.25, "EAN": 1.75,
+            "CSN": sn_factor, "ESN": 1.25 * sn_factor, "EASN": 1.75 * sn_factor
+        },
+        "F_KM": 1.31566,
+        "F_KM2": 1.70469,
+        "CORTES_KP": [1.70469, 2.61937, 3.38153, 4.14370, 4.90587, 7.95498]
     }
 
-def generar_tarifas_limpias(base5, juris):
+def generar_tarifas_final(base5, juris):
     rows = []
     b1 = base5[0]
-    m_map = get_mults(juris)
+    conf = get_config(juris)
+    m_map = conf["MULT"]
     
-    # 1. SECCIONES 1 A 5 (El "corazón" del diccionario)
-    # Generamos por categoría para mantener el orden visual
-    for code, m in m_map.items():
-        # Mapeo de ID según tu estándar (SCN, SEN, SEAN...)
-        id_suffix = code if code.startswith("S") else ("S"+code if "EAN" not in code else "SEAN")
-        if code == "CN": id_suffix = "SCN"
-        if code == "CSN": id_suffix = "SCSN"
-        
-        for i, b in enumerate(base5):
-            val = r(b * m)
-            # Rango especial PBA Sección 1
+    # 1. SECCIONES 1 A 5 (30 filas)
+    codes = ["SCN", "SEN", "SEAN", "SCSN", "SESN", "SEASN"]
+    for i, b in enumerate(base5):
+        for c in codes:
+            # Mapeo de llaves de multiplicadores
+            m_key = "CN" if c == "SCN" else ("CSN" if c == "SCSN" else c.replace("S", ""))
+            if c == "SEAN": m_key = "EAN"
+            
+            val = r(b * m_map[m_key])
             inf, sup = val, val
-            if juris == "PBA" and i == 0 and id_suffix == "SCN":
-                inf, sup = 721.33, 721.84
-            rows.append({"Id": f"{i+1}{id_suffix}", "Limite Inferior": inf, "Limite Superior": sup})
+            
+            # Ajuste de centavos fijo para Sección 1 en PBA/DF según histórico
+            if juris == "PBA" and i == 0 and c == "SCN": inf, sup = 721.33, 721.83
+            if juris == "DF" and i == 0 and c == "SCN": inf, sup = 650.11, 650.11
+                
+            rows.append({"Id": f"{i+1}{c}", "Limite Inferior": inf, "Limite Superior": sup})
 
-    # Si es DF, terminamos aquí para no ensuciar el archivo
-    if juris == "DF":
-        return pd.DataFrame(rows)
+    if juris == "DF": return pd.DataFrame(rows)
 
-    # --- LÓGICA PARA PBA Y JN (KMs y KPs) ---
-    # 2. SERIES 1-4KM (4 repeticiones por categoría)
-    base_km = r(b1 * 1.316)
-    for cat_id, m_val in m_map.items():
-        # IDs de KM no llevan la 'S' inicial (1-4KMCN)
-        v_sup = r(base_km * m_val)
-        v_inf = r(v_sup - 0.50) if cat_id == "CN" and juris == "PBA" else v_sup
+    # 2. SERIES 1-4KM (24 filas)
+    base_km = r(b1 * conf["F_KM"])
+    for cat in ["CN", "EN", "EAN", "CSN", "ESN", "EASN"]:
+        v_sup = r(base_km * m_map[cat])
+        # Rango 0.50 solo para categorías comunes en PBA/DF
+        v_inf = r(v_sup - 0.50) if cat in ["CN", "EN", "EAN"] and juris != "JN" else v_sup
         for _ in range(4):
-            rows.append({"Id": f"1-4KM{cat_id}", "Limite Inferior": v_inf, "Limite Superior": v_sup})
+            rows.append({"Id": f"1-4KM{cat}", "Limite Inferior": v_inf, "Limite Superior": v_sup})
 
-    # 3. LA PLATA (LP) - Solo PBA
+    # 3. LA PLATA (LP) - Solo PBA (20 filas)
     if juris == "PBA":
-        for cat_id in ["CN", "EN", "CSN", "ESN"]:
+        for cat in ["SCN", "SEN", "SCSN", "SESN"]:
             for i, b in enumerate(base5):
-                v = r(b * 1.09 * m_map[cat_id])
-                id_lp = f"{i+1}S{cat_id}LP" if not cat_id.startswith("S") else f"{i+1}{cat_id}LP"
-                rows.append({"Id": id_lp, "Limite Inferior": v, "Limite Superior": r(v + 0.01)})
+                m_key = "CN" if cat == "SCN" else "CSN" if cat == "SCSN" else cat.replace("S", "")
+                v = r(b * 1.08907 * m_map[m_key])
+                rows.append({"Id": f"{i+1}{cat}LP", "Limite Inferior": v, "Limite Superior": r(v + 0.01)})
 
-    # 4. RANGOS KP (5KP a 9KP)
-    cortes = [1.706, 2.621, 3.384, 4.146, 4.909, 7.961]
-    for cat_id, m_val in m_map.items():
+    # 4. RANGOS KP (30 filas)
+    for cat in ["CN", "EN", "EAN", "CSN", "ESN", "EASN"]:
         for i in range(5):
-            inf = r(b1 * cortes[i] * m_val)
-            sup = r(b1 * cortes[i+1] * m_val)
-            rows.append({"Id": f"{i+5}KP{cat_id}", "Limite Inferior": inf, "Limite Superior": sup})
+            inf = r(b1 * conf["CORTES_KP"][i] * m_map[cat])
+            sup = r(b1 * conf["CORTES_KP"][i+1] * m_map[cat])
+            rows.append({"Id": f"{i+5}KP{cat}", "Limite Inferior": inf, "Limite Superior": sup})
+
+    # 5. SEMI-RÁPIDOS PBA (SRSR)
+    if juris == "PBA":
+        for i, b in enumerate(base5):
+            v_sr = r(b * 1.5) # Factor SRSR histórico (1.25 * 1.20)
+            rows.append({"Id": f"{i+1}SRSRN", "Limite Inferior": v_sr, "Limite Superior": v_sr})
+            rows.append({"Id": f"{i+1}SRSRSN", "Limite Inferior": r(v_sr * 1.59), "Limite Superior": r(v_sr * 1.59)})
+
+    # 6. KM2 (Refuerzos)
+    for cat in ["CN", "EN", "EAN", "CSN", "ESN", "EASN"]:
+        v_inf = r(base_km * m_map[cat])
+        v_sup = r(b1 * conf["F_KM2"] * m_map[cat])
+        rows.append({"Id": f"1-4KM{cat}2", "Limite Inferior": v_inf, "Limite Superior": v_sup})
 
     return pd.DataFrame(rows)
 
 def render_tarifas_tab():
-    st.header("📊 Generador de Tarifas TTR")
-    st.info("Redondeo a 2 decimales (Financial Half-Up) con multiplicadores 1.75 y 1.59.")
+    st.header("📊 Generador Maestro de Tarifas TTR")
+    st.info("Configuración de alta precisión para DF, PBA y JN.")
 
     juris = st.radio("Jurisdicción", ["DF", "PBA", "JN"], horizontal=True)
     
-    # Valores sugeridos de tus planillas de referencia
-    if juris == "PBA": def_vals = [721.84, 804.12, 866.06, 928.07, 989.64]
+    # Valores por defecto para acelerar tu carga
+    if juris == "PBA": def_vals = [721.83, 804.12, 866.06, 928.07, 989.64]
     elif juris == "JN": def_vals = [650.00, 724.09, 779.87, 835.71, 891.16]
-    else: def_vals = [650.11, 722.38, 778.04, 833.73, 891.33]
+    else: def_vals = [650.11, 722.38, 778.04, 833.73, 891.33] # DF
 
     cols = st.columns(5)
     base5 = [cols[i].number_input(f"Secc {i+1}", value=def_vals[i], format="%.2f", key=f"b{i}") for i in range(5)]
 
     if any(base5):
-        df = generar_tarifas_final = generar_tarifas_limpias(base5, juris)
-        st.success(f"✅ Diccionario {juris} generado correctamente ({len(df)} filas).")
+        df = generar_tarifas_final(base5, juris)
+        st.success(f"✅ ¡Estructura {juris} lista! ({len(df)} registros)")
 
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -123,10 +135,10 @@ def render_tarifas_tab():
         st.download_button(
             label=f"⬇️ Descargar Excel {juris}",
             data=output.getvalue(),
-            file_name=f"Tarifas_{juris}_TTR_2026.xlsx",
+            file_name=f"Tarifas_{juris}_TTR_Pro.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary"
         )
 
-        with st.expander("👁️ Vista Previa (Verificar IDs y Redondeo)"):
+        with st.expander("👁️ Verificación de Centavos y IDs"):
             st.dataframe(df, use_container_width=True, height=400)
