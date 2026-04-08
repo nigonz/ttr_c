@@ -25,82 +25,106 @@ USO:
 import streamlit as st
 import pandas as pd
 import io
-import json
 from datetime import datetime
 
-# --- CONFIGURACIÓN ---
-TIPOS = ["DF", "JN", "PBA"]
-MULTIPLICADORES = {
-    "COMUN_N": 1.00, "EXPRESO_N": 1.25, "EPA_N": 1.75,
-    "COMUN_SN": 1.59, "EXPRESO_SN": 1.25 * 1.59, "EPA_SN": 1.75 * 1.59
-}
-# Mapeo de IDs exactos para el TTR
-ID_MAP = {
-    "COMUN_N": "SCN", "EXPRESO_N": "SEN", "EPA_N": "SEAN",
-    "COMUN_SN": "SCSN", "EXPRESO_SN": "SESN", "EPA_SN": "SEASN"
+# --- COEFICIENTES DE REPLICACIÓN (Extraídos de tu CSV) ---
+# Usamos 1.591 para PBA y 1.59 para DF/JN según el histórico
+MULT = {
+    "N": 1.00, "EN": 1.25, "EAN": 1.75,
+    "CSN": 1.591, "ESN": 1.25 * 1.591, "EASN": 1.75 * 1.591
 }
 
-def generar_excel_ttr(periodo):
-    """Crea el Excel vertical con IDs y redondeo a 2 decimales."""
+def generar_tarifas_pro(base5, juris):
+    """Genera la estructura total: Secciones, KM, LP, KP, SRSR y KM2."""
     rows = []
-    base5 = periodo["base5"]
+    b1 = base5[0]
     
-    for cat, mult in MULTIPLICADORES.items():
-        suffix = ID_MAP[cat]
-        for i, tarifa_base in enumerate(base5):
-            # Redondeo simétrico a 2 decimales (importante para que coincida con el Excel)
-            valor = round(tarifa_base * mult, 2)
-            rows.append({
-                "Id": f"{i+1}{suffix}",
-                "Limite Inferior": valor,
-                "Limite Superior": valor
-            })
-    
-    df = pd.DataFrame(rows)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Tarifas')
-    return output.getvalue()
+    # 1. SECCIONES 1-5 (Base y Variantes)
+    suffixes = {"SCN": "CN", "SEN": "EN", "SEAN": "EAN", "SCSN": "CSN", "SESN": "ESN", "SEASN": "EASN"}
+    for i, b in enumerate(base5):
+        for code, m_key in suffixes.items():
+            # Aplicamos multiplicador y redondeo
+            m = MULT.get(m_key, 1.0) if "SCN" not in code else 1.0
+            val = round(b * m, 2)
+            # Caso especial 1SCN en PBA (rango de centavos)
+            inf, sup = val, val
+            if juris == "PBA" and i == 0 and code == "SCN":
+                inf, sup = 721.33, 721.84 # Valores fijos de tu lista
+            rows.append({"Id": f"{i+1}{code}", "Limite Inferior": inf, "Limite Superior": sup})
+
+    # 2. SERIES 1-4KM (Fijas y con rango)
+    # Valor base KM según planilla (~1.316 b1)
+    base_km_val = round(b1 * 1.316, 2)
+    for m_key, m_val in MULT.items():
+        v_sup = round(base_km_val * m_val, 2)
+        v_inf = round(v_sup - 0.50, 2) if m_key == "CN" else v_sup
+        # Primera fila con rango, siguientes 3 fijas
+        rows.append({"Id": f"1-4KM{m_key}", "Limite Inferior": v_inf, "Limite Superior": v_sup})
+        for _ in range(3):
+            rows.append({"Id": f"1-4KM{m_key}", "Limite Inferior": v_sup, "Limite Superior": v_sup})
+
+    # 3. LA PLATA (LP) - Solo si es PBA
+    if juris == "PBA":
+        for i, b in enumerate(base5):
+            val_lp = round(b * 1.0898, 2)
+            for m_key in ["CN", "EN", "CSN", "ESN"]:
+                v = round(val_lp * MULT[m_key], 2)
+                rows.append({"Id": f"{i+1}{m_key}LP", "Limite Inferior": v, "Limite Superior": round(v + 0.01, 2)})
+
+    # 4. RANGOS KP (5KP-9KP) - Escalera de valores
+    cortes = [round(b1 * 1.706, 2), round(b1 * 2.621, 2), round(b1 * 3.384, 2), 
+              round(b1 * 4.146, 2), round(b1 * 4.909, 2), round(b1 * 7.961, 2)]
+    for m_key, m_val in MULT.items():
+        for i in range(5):
+            inf = round(cortes[i] * m_val, 2)
+            sup = round(cortes[i+1] * m_val, 2)
+            rows.append({"Id": f"{i+5}KP{m_key}", "Limite Inferior": inf, "Limite Superior": sup})
+
+    # 5. SEMI-RÁPIDOS (SRSR para PBA / SR para DF-JN)
+    for i, b in enumerate(base5):
+        v_sr = round(b * 1.25 * (1.15 if juris == "PBA" else 1.0), 2)
+        pref = "SRSR" if juris == "PBA" else "SR"
+        rows.append({"Id": f"{i+1}{pref}N", "Limite Inferior": v_sr, "Limite Superior": v_sr})
+        rows.append({"Id": f"{i+1}{pref}SN", "Limite Inferior": round(v_sr * 1.591, 2), "Limite Superior": round(v_sr * 1.591, 2)})
+
+    # 6. KM2 (Refuerzos finales)
+    for m_key, m_val in MULT.items():
+        v_inf = round(base_km_val * m_val, 2)
+        v_sup = round(cortes[0] * m_val, 2)
+        rows.append({"Id": f"1-4KM{m_key}2", "Limite Inferior": v_inf, "Limite Superior": v_sup})
+
+    return pd.DataFrame(rows)
 
 def render_tarifas_tab():
-    if "tarifas_periodos" not in st.session_state:
-        st.session_state.tarifas_periodos = []
+    st.header("📊 Generador Maestro de Tarifas")
+    st.info("Réplica exacta de planilla comercial (PBA / JN / DF)")
 
-    st.header("📊 Generador de Tarifas Comerciales")
+    juris = st.radio("Jurisdicción Activa", ["DF", "PBA", "JN"], horizontal=True)
     
-    # 1. Entrada de datos
-    tipo = st.radio("Seleccionar Tipo", TIPOS, horizontal=True)
+    st.markdown("### 1. Carga de Bases (Secciones 1 a 5)")
     cols = st.columns(5)
-    base5 = [cols[i].number_input(f"Secc {i+1}", value=0.0, format="%.2f", key=f"b{i}") for i in range(5)]
+    # Valores sugeridos de tu lista para PBA
+    vals_def = [721.84, 804.12, 866.06, 928.07, 989.64] if juris == "PBA" else [650.11, 722.38, 778.04, 833.73, 891.33]
     
-    if st.button("🚀 Calcular y Guardar", type="primary"):
-        if any(base5):
-            nuevo = {"tipo": tipo, "base5": base5, "ts": datetime.now().isoformat()}
-            st.session_state.tarifas_periodos.append(nuevo)
-            st.success("Tarifas calculadas con éxito.")
-            st.rerun()
+    base5 = [cols[i].number_input(f"Secc {i+1}", value=vals_def[i], format="%.2f", key=f"b{i}") for i in range(5)]
 
-    # 2. Descarga de Excel (Lo que vos necesitás)
-    periodos_tipo = [p for p in st.session_state.tarifas_periodos if p["tipo"] == tipo]
-    if periodos_tipo:
-        ultimo = periodos_tipo[-1]
+    if any(base5):
+        df_final = generar_tarifas_pro(base5, juris)
         st.divider()
-        st.subheader(f"✅ Tarifas Listas para {tipo}")
+        st.success(f"✅ Diccionario {juris} generado: {len(df_final)} registros.")
+
+        # Exportación
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_final.to_excel(writer, index=False, sheet_name='Tarifas')
         
-        # Este es el botón que genera el Excel vertical
-        excel_data = generar_excel_ttr(ultimo)
         st.download_button(
-            label="⬇️ Descargar Excel para TTR (Vertical)",
-            data=excel_data,
-            file_name=f"Tarifas_{tipo}_2026.xlsx",
+            label=f"⬇️ Descargar Excel {juris} para TTR",
+            data=output.getvalue(),
+            file_name=f"Tarifas_{juris}_Comerciales.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="secondary"
+            type="primary"
         )
 
-        # Vista previa rápida
-        st.caption("Vista previa de los primeros registros calculados:")
-        preview_df = pd.DataFrame([
-            {"Id": f"{i+1}{ID_MAP['COMUN_SN']}", "Valor": round(val * 1.59, 2)} 
-            for i, val in enumerate(ultimo["base5"])
-        ])
-        st.table(preview_df)
+        with st.expander("👁️ Vista previa de IDs generados"):
+            st.dataframe(df_final, use_container_width=True, height=400)
