@@ -10,6 +10,7 @@ import sys
 import os
 import traceback
 
+
 import pandas as pd
 import streamlit as st
 
@@ -19,6 +20,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from modules.tariff_loader import load_tarifas, get_filtro1_threshold
 from modules.process_df import process_df
 from modules.process_pba_jn import process_pba_jn
+from modules.tarifas_module import render_tarifas_tab
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -399,7 +401,11 @@ def main():
 
     year, resolucion = sidebar_config()
 
-    tabs = st.tabs(["🏙️ DF", "🌿 PBA", "🚌 JN", "📖 Ayuda"])
+    # Agregamos "📊 Tarifas" a la lista de nombres
+    tabs = st.tabs(["🏙️ DF", "🌿 PBA", "🚌 JN", "📊 Tarifas", "📖 Ayuda"])
+    
+     with tabs[3]:
+        render_tarifas_tab()
 
     with tabs[0]:
         tab_df(year, resolucion)
@@ -410,7 +416,11 @@ def main():
     with tabs[2]:
         tab_jn(year, resolucion)
 
-    with tabs[3]:
+    # Nuevo bloque para el módulo de tarifas comerciales
+   
+
+    # La ayuda ahora pasa al índice 4
+    with tabs[4]:
         tab_ayuda()
 
 
