@@ -2,11 +2,8 @@
 process_pba_jn.py
 -----------------
 Proceso TTR compartido para PBA y JN.
-La lógica es casi idéntica; las diferencias son:
-  - gt_values: qué GT se filtran
-  - Las tarifas provienen de distintos Excel
-  - JN aplica factor ENERGIA a la recaudación
-  - JN ajusta sección de SGII (min 4)
+Réplica EXACTA del Jupyter Notebook original (Modo "Aspiradora" de tarifas KM2),
+tomando los valores base desde el Excel Oficial.
 """
 
 import re
@@ -32,138 +29,11 @@ from modules.utils import (
 #  Helpers internos
 # ────────────────────────────────────────────────────────────────────────────────
 
-def _apply_km2_range(df: pd.DataFrame, tarifas: dict, sin_nom_val: int,
-                     all_cols: dict) -> pd.DataFrame:
-    """
-    Aplica tarifas KM2 (rango intermedio entre KM y KP).
-    Excluye filas que ya cayeron en seccionadas simples, LP, o SR.
-    *MODIFICACIÓN: Se elimina la validación de TipoServicio2 por 
-    criterio de negocio, replicando el barrido del código original.
-    """
-    base_mask = (
-        (df['PASES'] == 0) &
-        (df['sin_nominalizar'] == sin_nom_val)
-    )
-
-    # Columnas de exclusión: las seccionadas y LP del mismo tipo
-    all_col_names = list(all_cols.keys())
-    sr_cols = [c for c in all_col_names if is_sr(c)]
-
-    for id_val, (lim_inf, lim_sup) in tarifas.items():
-        ts = get_tipo_servicio(id_val)
-
-        # Columnas ya asignadas del mismo tipo + LP que excluyen este rango
-        sec_same = [c for c in all_col_names if is_seccion_simple(c) and get_tipo_servicio(c) == ts]
-        lp_same = [c for c in all_col_names if is_la_plata(c) and get_tipo_servicio(c) == ts]
-        km_exact_same = [c for c in all_col_names if is_km_exact(c) and get_tipo_servicio(c) == ts]
-
-        exclude = sec_same + lp_same + km_exact_same + sr_cols
-        exclude_ok = [c for c in exclude if c in df.columns]
-
-        mask = (
-            base_mask &
-            (df['TARIFA BASE ITG'] >= lim_inf - 0.5) &
-            (df['TARIFA BASE ITG'] < lim_sup + 0.5) &
-            # LA SIGUIENTE LÍNEA SE ELIMINÓ PARA REPLICAR EL CÓDIGO ORIGINAL:
-            # (df['TipoServicio2'] == ts) &  
-            (df['GT'] != 'DF') &
-            ((df[exclude_ok].sum(axis=1) == 0) if exclude_ok else True)
-        )
-        df[id_val] = np.where(mask, 1, 0)
-    return df
-def _build_filtro_km(df: pd.DataFrame, tarifas_km2: dict,
-                      tarifas_km2_sn: dict,
-                      all_cols_n: dict, all_cols_sn: dict) -> pd.DataFrame:
-    """
-    Construye columnas Filtro1-4KM* para detectar casos donde el rango KM2
-    corresponde en realidad a una sección específica de un tipo superior.
-    """
-    # Normalizado
-    for id_val in tarifas_km2:
-        ts = get_tipo_servicio(id_val)
-        col = f'Filtro{id_val}'
-
-        if ts == 'C':
-            # 1-4KMCN2: tipo C con servicios E o EA activos → sección 4
-            ref_cols = [c for c in all_cols_n if get_tipo_servicio(c) in ('E', 'EA')
-                        and not is_la_plata(c) and not is_kp(c) and not is_km_exact(c) and not is_km2_range(c) and not is_sr(c)]
-            ref_ok = [c for c in ref_cols if c in df.columns]
-            df[col] = np.where(
-                (df['TipoServicio2'] == 'C') &
-                (df[ref_ok].sum(axis=1) != 0 if ref_ok else False) &
-                (df['LaPlata'] == 0) &
-                (df[id_val] == 1 if id_val in df.columns else False),
-                4, 0
-            )
-        elif ts == 'E':
-            ref_cols = [c for c in all_cols_n if get_tipo_servicio(c) == 'EA'
-                        and not is_la_plata(c) and not is_kp(c) and not is_km_exact(c) and not is_km2_range(c) and not is_sr(c)]
-            ref_ok = [c for c in ref_cols if c in df.columns]
-            df[col] = np.where(
-                (df['TipoServicio2'] == 'E') &
-                (df[ref_ok].sum(axis=1) != 0 if ref_ok else False) &
-                (df['LaPlata'] == 0) &
-                (df[id_val] == 1 if id_val in df.columns else False),
-                4, 0
-            )
-        elif ts == 'EA':
-            df[col] = np.where(
-                (df['TipoServicio2'] == 'EA') &
-                (df['LaPlata'] == 0) &
-                (df[id_val] == 1 if id_val in df.columns else False),
-                4, 0
-            )
-        else:
-            df[col] = 0
-
-    # Sin nominalizar
-    for id_val in tarifas_km2_sn:
-        ts = get_tipo_servicio(id_val)
-        col = f'Filtro{id_val}'
-
-        if ts == 'C':
-            ref_cols = [c for c in all_cols_sn if get_tipo_servicio(c) in ('E', 'EA')
-                        and not is_la_plata(c) and not is_kp(c) and not is_km_exact(c) and not is_km2_range(c) and not is_sr(c)]
-            ref_ok = [c for c in ref_cols if c in df.columns]
-            df[col] = np.where(
-                (df['TipoServicio2'] == 'C') &
-                (df[ref_ok].sum(axis=1) != 0 if ref_ok else False) &
-                (df['LaPlata'] == 0) &
-                (df[id_val] == 1 if id_val in df.columns else False),
-                4, 0
-            )
-        elif ts == 'E':
-            ref_cols = [c for c in all_cols_sn if get_tipo_servicio(c) == 'EA'
-                        and not is_la_plata(c) and not is_kp(c) and not is_km_exact(c) and not is_km2_range(c) and not is_sr(c)]
-            ref_ok = [c for c in ref_cols if c in df.columns]
-            df[col] = np.where(
-                (df['TipoServicio2'] == 'E') &
-                (df[ref_ok].sum(axis=1) != 0 if ref_ok else False) &
-                (df['LaPlata'] == 0) &
-                (df[id_val] == 1 if id_val in df.columns else False),
-                4, 0
-            )
-        elif ts == 'EA':
-            df[col] = np.where(
-                (df['TipoServicio2'] == 'EA') &
-                (df['LaPlata'] == 0) &
-                (df[id_val] == 1 if id_val in df.columns else False),
-                4, 0
-            )
-        else:
-            df[col] = 0
-
-    return df
-
-
 def _build_compilado_ts(df: pd.DataFrame,
                          km_p_cols: list, sec_cols: list) -> pd.DataFrame:
     """Columna compilado_ts: tipo de servicio consolidado."""
     km_p_ok = [c for c in km_p_cols if c in df.columns]
-    sec_c_ok = [c for c in sec_cols if 'sec_c' == c]
-    sec_e_ok = [c for c in sec_cols if 'sec_e' == c]
-    sec_ea_ok = [c for c in sec_cols if 'sec_ea' == c]
-
+    
     km_active = df[km_p_ok].sum(axis=1) > 0 if km_p_ok else pd.Series(False, index=df.index)
 
     # seccionada_correcta cols
@@ -204,25 +74,14 @@ def process_pba_jn(df1: pd.DataFrame,
                     resolucion: str = '16',
                     ttr_sgii: pd.DataFrame = None,
                     apply_energia_factor: bool = False) -> pd.DataFrame:
-    """
-    Proceso PBA o JN (según gt_values).
-
-    Parámetros adicionales
-    ----------------------
-    ttr_sgii          : TTR especial para SGII-UMA2 (JN/PBA)
-    apply_energia_factor: True en JN (aplica factor GNC/Electrico/Diesel)
-    """
 
     # ── 1. Preprocesamiento base ─────────────────────────────────────────────
     df = preprocess_base(df1, nom_ts, nom_gt, gt_values=gt_values)
     add_la_plata_flag(df)
 
-    # ---> INICIO DEL PARCHE DE BLINDAJE DE TIPOS <---
-    # Forzamos las columnas categóricas de texto a números enteros puros 
-    # para que las condiciones lógicas del resto del script (== 1 o == 0) funcionen.
+    # Blindaje de tipos de datos para variables lógicas
     df['sin_nominalizar'] = pd.to_numeric(df['sin_nominalizar'], errors='coerce').fillna(0).astype(int)
     df['PASES'] = pd.to_numeric(df['PASES'], errors='coerce').fillna(0).astype(int)
-    # ---> FIN DEL PARCHE <---
 
     # ── 2. FILTRO_1 ──────────────────────────────────────────────────────────
     threshold = get_filtro1_threshold(tarifas)
@@ -231,117 +90,288 @@ def process_pba_jn(df1: pd.DataFrame,
         1, 0
     )
 
+    # ---> INYECTOR DE RANGOS "CONTABLES" <---
+    # Si el Excel oficial no trae los rangos intermedios inventados por el economista,
+    # los inyectamos en memoria acá para que la "aspiradora" funcione.
+    rangos_km2_inyectados = {
+        '1-4KMCN2': (855.17, 1108.10),
+        '1-4KMEN2': (1068.96, 1385.12),
+        '1-4KMEAN2': (1496.54, 1939.17),
+        '1-4KMCSN2': (1359.72, 1761.88),
+        '1-4KMESN2': (1699.65, 2202.35),
+        '1-4KMEASN2': (2379.51, 3083.28)
+    }
+    for k, v in rangos_km2_inyectados.items():
+        if k not in tarifas:
+            tarifas[k] = v
+
     # ── 3. Clasificar tarifas por grupo ─────────────────────────────────────
     def subset(fn_filter):
         return {k: v for k, v in tarifas.items() if fn_filter(k)}
 
-    # Seccionadas simples (no LP, no SR)
     sec_n = subset(lambda k: is_seccion_simple(k) and not is_sin_nominalizar(k) and not is_la_plata(k) and not is_sr(k))
     sec_sn = subset(lambda k: is_seccion_simple(k) and is_sin_nominalizar(k) and not is_la_plata(k) and not is_sr(k))
-
-    # KM exactas
     km_n = subset(lambda k: is_km_exact(k) and not is_sin_nominalizar(k))
     km_sn = subset(lambda k: is_km_exact(k) and is_sin_nominalizar(k))
-
-    # KM2 (rangos intermedios)
-    km2_n = subset(lambda k: is_km2_range(k) and not is_sin_nominalizar(k))
-    km2_sn = subset(lambda k: is_km2_range(k) and is_sin_nominalizar(k))
-
-    # KP (kilométrico-pasaje)
     kp_n = subset(lambda k: is_kp(k) and not is_sin_nominalizar(k))
     kp_sn = subset(lambda k: is_kp(k) and is_sin_nominalizar(k))
-
-    # La Plata
     lp_n = subset(lambda k: is_la_plata(k) and not is_sin_nominalizar(k))
     lp_sn = subset(lambda k: is_la_plata(k) and is_sin_nominalizar(k))
-
-    # SR
     sr_n = subset(lambda k: is_sr(k) and not is_sin_nominalizar(k))
     sr_sn = subset(lambda k: is_sr(k) and is_sin_nominalizar(k))
 
-    all_n = {**sec_n, **km_n, **km2_n, **kp_n, **lp_n, **sr_n}
-    all_sn = {**sec_sn, **km_sn, **km2_sn, **kp_sn, **lp_sn, **sr_sn}
+    all_n = {**sec_n, **km_n, **kp_n, **lp_n, **sr_n}
+    all_sn = {**sec_sn, **km_sn, **kp_sn, **lp_sn, **sr_sn}
 
-    # ── 4. Aplicar tarifas seccionadas simples ───────────────────────────────
+    # ── 4 al 8. Asignaciones Estándar ────────────────────────────────────────
     def ts_cond_nosr_nolp(df, id_val):
         return (df['TipoServicio'] != 'SR') & (df['LaPlata'] != 1)
 
     apply_seccion_tarifas(df, sec_n, sin_nom_val=0, extra_conditions=ts_cond_nosr_nolp)
     apply_seccion_tarifas(df, sec_sn, sin_nom_val=1, extra_conditions=ts_cond_nosr_nolp)
 
-    # ── 5. KM exactas ────────────────────────────────────────────────────────
     apply_km_exact_tarifas(df, km_n, sin_nom_val=0)
     apply_km_exact_tarifas(df, km_sn, sin_nom_val=1)
 
-    # ── 6. La Plata ──────────────────────────────────────────────────────────
     def lp_cond(df, id_val):
         return df['LaPlata'] == 1
 
     apply_seccion_tarifas(df, lp_n, sin_nom_val=0, extra_conditions=lp_cond)
     apply_seccion_tarifas(df, lp_sn, sin_nom_val=1, extra_conditions=lp_cond)
 
-    # ── 7. KP ────────────────────────────────────────────────────────────────
     apply_kp_tarifas(df, kp_n, sin_nom_val=0)
     apply_kp_tarifas(df, kp_sn, sin_nom_val=1)
 
-    # ── 8. SR ────────────────────────────────────────────────────────────────
     apply_sr_tarifas(df, sr_n, sin_nom_val=0)
     apply_sr_tarifas(df, sr_sn, sin_nom_val=1)
 
-    # ── 9. KM2 rangos ────────────────────────────────────────────────────────
-    _apply_km2_range(df, km2_n, 0, all_n)
-    _apply_km2_range(df, km2_sn, 1, all_sn)
+    # ── 9. RANGOS KM2 EXPLICITOS (REPLICA DEL NOTEBOOK) ──────────────────────
+    def _safe_sum(df_obj, cols):
+        valid = [c for c in cols if c in df_obj.columns]
+        return df_obj[valid].sum(axis=1) if valid else pd.Series(0, index=df_obj.index)
 
-    # ── 10. Filtros KM ───────────────────────────────────────────────────────
-    _build_filtro_km(df, km2_n, km2_sn, all_n, all_sn)
+    columnas_sn_cn = ['1SCN', '2SCN', '3SCN', '4SCN', '5SCN']
+    columnas_kmn_cn = ['1-4KMCN']
+    columnas_snlp_cn = ['1SCNLP', '2SCNLP', '3SCNLP', '4SCNLP', '5SCNLP']
 
-    filtro_km_cols = [f'Filtro{k}' for k in {**km2_n, **km2_sn}]
+    columnas_sn_en = ['1SEN', '2SEN', '3SEN', '4SEN', '5SEN']
+    columnas_kmn_en = ['1-4KMEN']
+    columnas_kpn_en = ['5KPCN', '6KPCN', '7KPCN', '8KPCN', '9KPCN']
+    columnas_snlp_en = ['1SENLP', '2SENLP', '3SENLP', '4SENLP', '5SENLP']
 
-    # ── 11. seccionada_correcta (corrección para casos mixtos C-E / E-EA) ───
-    # Se construye para cada km2 el número de sección del tipo co-existente
-    for idx, (id_val_km2, ts_km2) in enumerate(
-        [(k, get_tipo_servicio(k)) for k in list(km2_n) + list(km2_sn)], 1
-    ):
-        sc_col = f'seccionada_correcta_{idx}'
-        filtro_col = f'Filtro{id_val_km2}'
-        sn_val = 1 if is_sin_nominalizar(id_val_km2) else 0
-        pool = all_sn if sn_val else all_n
+    columnas_sn_ean = ['1SEAN', '2SEAN', '3SEAN', '4SEAN', '5SEAN']
+    columnas_kmn_ean = ['1-4KMEAN']
+    columnas_kpn_ean = ['5KPCN', '6KPCN', '7KPCN', '8KPCN', '9KPCN', '5KPEN', '6KPEN', '7KPEN', '8KPEN', '9KPEN']
+    columnas_snlp_ean = ['1SCNLP', '2SCNLP', '3SCNLP', '4SCNLP', '5SCNLP', '1SENLP', '2SENLP', '3SENLP', '4SENLP', '5SENLP' ,'1SCSNLP', '2SCSNLP', '3SCSNLP', '4SCSNLP', '5SCSNLP', '1SESNLP', '2SESNLP', '3SESNLP', '4SESNLP', '5SESNLP']
 
-        # Tipo superior: si C → busca E/EA; si E → busca EA
-        if ts_km2 == 'C':
-            ref_ts_list = ['E', 'EA']
-        elif ts_km2 == 'E':
-            ref_ts_list = ['EA']
-        else:
-            ref_ts_list = []
+    columnas_sn_cSn = ['1SCSN', '2SCSN', '3SCSN', '4SCSN', '5SCSN']
+    columnas_kmn_cSn = ['1-4KMCSN']
+    columnas_snlp_cSn = ['1SCSNLP', '2SCSNLP', '3SCSNLP', '4SCSNLP', '5SCSNLP']
 
-        ref_cols_by_sec = {}
-        for sec in range(1, 6):
-            ref_cols_by_sec[sec] = [
-                c for c in pool
-                if (not is_kp(c) and not is_km_exact(c) and not is_km2_range(c)
-                    and get_tipo_servicio(c) in ref_ts_list
-                    and c.startswith(str(sec)))
-            ]
+    columnas_sn_eSn = ['1SESN', '2SESN', '3SESN', '4SESN', '5SESN']
+    columnas_kmn_eSn = ['1-4KMESN']
+    columnas_kpn_eSn = ['5KPCSN', '6KPCSN','7KPCSN','8KPCSN','9KPCSN']
+    columnas_snlp_eSn = ['1SESNLP', '2SESNLP', '3SESNLP', '4SESNLP', '5SESNLP']
 
-        conditions = []
-        values = []
-        for sec, cols in ref_cols_by_sec.items():
-            ok = [c for c in cols if c in df.columns]
-            if ok:
-                conditions.append(
-                    (df[id_val_km2] == 1 if id_val_km2 in df.columns else False) &
-                    (df[filtro_col] != 4 if filtro_col in df.columns else True) &
-                    (df[ok].sum(axis=1) > 0)
-                )
-                values.append(sec)
+    columnas_sn_eaSn = ['1SEASN', '2SEASN', '3SEASN', '4SEASN', '5SEASN']
+    columnas_kmn_eaSn = ['1-4KMEASN']
+    columnas_kpn_eaSn = ['5KPCSN', '6KPCSN', '7KPCSN', '8KPCSN', '9KPCSN', '5KPESN', '6KPESN', '7KPESN', '8KPESN', '9KPESN']
+    columnas_snlp_eaSn = ['1SCNLP', '2SCNLP', '3SCNLP', '4SCNLP', '5SCNLP', '1SENLP', '2SENLP', '3SENLP', '4SENLP', '5SENLP' ,'1SCSNLP', '2SCSNLP', '3SCSNLP', '4SCSNLP', '5SCSNLP', '1SESNLP', '2SESNLP', '3SESNLP', '4SESNLP', '5SESNLP']
 
-        if conditions:
-            df[sc_col] = np.select(conditions, values, default=0)
-        else:
-            df[sc_col] = 0
+    columnas_srn_srsn = ['1SRN', '2SRN', '3SRN', '4SRN', '5SRN', '1SRSN', '2SRSN', '3SRSN', '4SRSN', '5SRSN']
 
-    sc_cols = [c for c in df.columns if c.startswith('seccionada_correcta_')]
+    # 1-4KMCN2
+    lim_inf, lim_sup = tarifas['1-4KMCN2']
+    df['1-4KMCN2'] = np.where(
+        (df['TARIFA BASE ITG'] >= lim_inf - 0.5) &
+        (df['TARIFA BASE ITG'] < lim_sup + 0.5) &
+        (df['PASES'] == 0) &
+        (df['sin_nominalizar'] != 1) &
+        (_safe_sum(df, columnas_sn_cn) == 0) &
+        (_safe_sum(df, columnas_snlp_cn) == 0) &
+        (_safe_sum(df, columnas_kmn_cn) == 0) &
+        (df['GT'] != "DF") &
+        (_safe_sum(df, columnas_srn_srsn) == 0),
+        1, 0
+    )
+
+    # 1-4KMEN2
+    lim_inf, lim_sup = tarifas['1-4KMEN2']
+    df['1-4KMEN2'] = np.where(
+        (df['TARIFA BASE ITG'] >= lim_inf - 0.5) &
+        (df['TARIFA BASE ITG'] < lim_sup + 0.5) &
+        (df['PASES'] == 0) &
+        (df['sin_nominalizar'] != 1) &
+        (_safe_sum(df, columnas_sn_en) == 0) &
+        (_safe_sum(df, columnas_snlp_en) == 0) &
+        (_safe_sum(df, columnas_kmn_en) == 0) &
+        (_safe_sum(df, columnas_kpn_en) == 0) &
+        (df['GT'] != "DF") &
+        (_safe_sum(df, columnas_srn_srsn) == 0),
+        1, 0
+    )
+
+    # 1-4KMEAN2
+    lim_inf, lim_sup = tarifas['1-4KMEAN2']
+    df['1-4KMEAN2'] = np.where(
+        (df['TARIFA BASE ITG'] >= lim_inf - 0.5) &
+        (df['TARIFA BASE ITG'] < lim_sup + 0.5) &
+        (df['PASES'] == 0) &
+        (df['sin_nominalizar'] != 1) &
+        (_safe_sum(df, columnas_sn_ean) == 0) &
+        (_safe_sum(df, columnas_snlp_ean) == 0) &
+        (_safe_sum(df, columnas_kmn_ean) == 0) &
+        (_safe_sum(df, columnas_kpn_ean) == 0) &
+        (df['GT'] != "DF") &
+        (_safe_sum(df, columnas_srn_srsn) == 0),
+        1, 0
+    )
+
+    # 1-4KMCSN2
+    lim_inf, lim_sup = tarifas['1-4KMCSN2']
+    df['1-4KMCSN2'] = np.where(
+        (df['TARIFA BASE ITG'] >= lim_inf - 0.5) &
+        (df['TARIFA BASE ITG'] < lim_sup + 0.5) &
+        (df['PASES'] == 0) &
+        (df['sin_nominalizar'] == 1) &
+        (_safe_sum(df, columnas_sn_cSn) == 0) &
+        (_safe_sum(df, columnas_snlp_cSn) == 0) &
+        (_safe_sum(df, columnas_kmn_cSn) == 0) &
+        (df['GT'] != "DF") &
+        (_safe_sum(df, columnas_srn_srsn) == 0),
+        1, 0
+    )
+
+    # 1-4KMESN2
+    lim_inf, lim_sup = tarifas['1-4KMESN2']
+    df['1-4KMESN2'] = np.where(
+        (df['TARIFA BASE ITG'] >= lim_inf - 0.5) &
+        (df['TARIFA BASE ITG'] < lim_sup + 0.5) &
+        (df['PASES'] == 0) &
+        (df['sin_nominalizar'] == 1) &
+        (_safe_sum(df, columnas_sn_eSn) == 0) &
+        (_safe_sum(df, columnas_snlp_eSn) == 0) &
+        (_safe_sum(df, columnas_kmn_eSn) == 0) &
+        (_safe_sum(df, columnas_kpn_eSn) == 0) &
+        (df['GT'] != "DF") &
+        (_safe_sum(df, columnas_srn_srsn) == 0),
+        1, 0
+    )
+
+    # 1-4KMEASN2
+    lim_inf, lim_sup = tarifas['1-4KMEASN2']
+    df['1-4KMEASN2'] = np.where(
+        (df['TARIFA BASE ITG'] >= lim_inf - 0.5) &
+        (df['TARIFA BASE ITG'] < lim_sup + 0.5) &
+        (df['PASES'] == 0) &
+        (df['sin_nominalizar'] == 1) &
+        (_safe_sum(df, columnas_sn_eaSn) == 0) &
+        (_safe_sum(df, columnas_snlp_eaSn) == 0) &
+        (_safe_sum(df, columnas_kmn_eaSn) == 0) &
+        (_safe_sum(df, columnas_kpn_eaSn) == 0) &
+        (df['GT'] != "DF") &
+        (_safe_sum(df, columnas_srn_srsn) == 0),
+        1, 0
+    )
+
+    # ── 10. Filtros KM (REPLICA DEL NOTEBOOK) ────────────────────────────────
+    df['Filtro1-4KMCN'] = np.where(
+        (df['TipoServicio2'] == 'C') &
+        (_safe_sum(df, ['1SEN', '2SEN', '3SEN', '4SEN', '5SEN', '1SEAN', '2SEAN', '3SEAN', '4SEAN', '5SEAN']) != 0) &
+        (df['LaPlata'] == 0) &
+        (df['1-4KMCN2'] == 1),
+        4, 0
+    )
+
+    df['Filtro1-4KMEN'] = np.where(
+        (df['TipoServicio2'] == 'E') &
+        (_safe_sum(df, ['1SEAN', '2SEAN', '3SEAN', '4SEAN', '5SEAN']) != 0)&
+        (df['LaPlata'] == 0) &
+        (df['1-4KMEN2'] == 1),
+        4, 0
+    )
+
+    df['Filtro1-4KMEAN'] = np.where(
+        (df['TipoServicio2'] == 'EA') &
+        (df['LaPlata'] == 0) &
+        (df['1-4KMEAN2'] == 1),
+        4, 0
+    )
+
+    df['Filtro1-4KMCSN'] = np.where(
+        (df['TipoServicio2'] == 'C') &
+        (_safe_sum(df, ['1SESN', '2SESN', '3SESN', '4SESN', '5SESN', '1SEASN', '2SEASN', '3SEASN', '4SEASN', '5SEASN']) != 0)&
+        (df['LaPlata'] == 0) &
+        (df['1-4KMCSN2'] == 1),
+        4, 0
+    )
+
+    df['Filtro1-4KMESN'] = np.where(
+        (df['TipoServicio2'] == 'E') &
+        (_safe_sum(df, ['1SEASN', '2SEASN', '3SEASN', '4SEASN', '5SEASN']) != 0)&
+        (df['LaPlata'] == 0) &
+        (df['1-4KMESN2'] == 1),
+        4, 0
+    )
+
+    df['Filtro1-4KMEASN'] = np.where(
+        (df['TipoServicio2'] == 'EA') &
+        (df['LaPlata'] == 0) &
+        (df['1-4KMEASN2'] == 1),
+        4, 0
+    )
+
+    filtro_km_cols = ['Filtro1-4KMCN', 'Filtro1-4KMEN', 'Filtro1-4KMEAN', 'Filtro1-4KMCSN', 'Filtro1-4KMESN', 'Filtro1-4KMEASN']
+
+    # ── 11. seccionada_correcta (REPLICA DEL NOTEBOOK) ───────────────────────
+    def _col_eq_1(col):
+        return df[col] == 1 if col in df.columns else pd.Series(False, index=df.index)
+
+    df['seccionada_correcta_1'] = np.select(
+        [
+            (df['1-4KMCN2'] == 1) & (df['Filtro1-4KMCN'] != 4) & (_col_eq_1('1SEN') | _col_eq_1('1SENLP')),
+            (df['1-4KMCN2'] == 1) & (df['Filtro1-4KMCN'] != 4) & (_col_eq_1('2SEN') | _col_eq_1('2SENLP')),
+            (df['1-4KMCN2'] == 1) & (df['Filtro1-4KMCN'] != 4) & (_col_eq_1('3SEN') | _col_eq_1('3SENLP')),
+            (df['1-4KMCN2'] == 1) & (df['Filtro1-4KMCN'] != 4) & (_col_eq_1('4SEN') | _col_eq_1('4SENLP')),
+            (df['1-4KMCN2'] == 1) & (df['Filtro1-4KMCN'] != 4) & (_col_eq_1('5SEN') | _col_eq_1('5SENLP'))
+        ],
+        [1, 2, 3, 4, 5], default=0
+    )
+
+    df['seccionada_correcta_3'] = np.select(
+        [
+            (df['Filtro1-4KMCSN'] != 4) & (df['1-4KMCSN2'] == 1) & (_col_eq_1('1SESN') | _col_eq_1('1SESNLP')),
+            (df['Filtro1-4KMCSN'] != 4) & (df['1-4KMCSN2'] == 1) & (_col_eq_1('2SESN') | _col_eq_1('2SESNLP')),
+            (df['Filtro1-4KMCSN'] != 4) & (df['1-4KMCSN2'] == 1) & (_col_eq_1('3SESN') | _col_eq_1('3SESNLP')),
+            (df['Filtro1-4KMCSN'] != 4) & (df['1-4KMCSN2'] == 1) & (_col_eq_1('4SESN') | _col_eq_1('4SESNLP')),
+            (df['Filtro1-4KMCSN'] != 4) & (df['1-4KMCSN2'] == 1) & (_col_eq_1('5SESN') | _col_eq_1('5SESNLP'))
+        ],
+        [1, 2, 3, 4, 5], default=0
+    )
+
+    df['seccionada_correcta_2'] = np.select(
+        [
+            (df['1-4KMEN2'] == 1) & (df['Filtro1-4KMEN'] != 4) & _col_eq_1('1SEAN'),
+            (df['1-4KMEN2'] == 1) & (df['Filtro1-4KMEN'] != 4) & _col_eq_1('2SEAN'),
+            (df['1-4KMEN2'] == 1) & (df['Filtro1-4KMEN'] != 4) & _col_eq_1('3SEAN'),
+            (df['1-4KMEN2'] == 1) & (df['Filtro1-4KMEN'] != 4) & _col_eq_1('4SEAN'),
+            (df['1-4KMEN2'] == 1) & (df['Filtro1-4KMEN'] != 4) & _col_eq_1('5SEAN')
+        ],
+        [1, 2, 3, 4, 5], default=0
+    )
+
+    df['seccionada_correcta_4'] = np.select(
+        [
+            (df['1-4KMESN2'] == 1) & (df['Filtro1-4KMESN'] != 4) & _col_eq_1('1SEASN'),
+            (df['1-4KMESN2'] == 1) & (df['Filtro1-4KMESN'] != 4) & _col_eq_1('2SEASN'),
+            (df['1-4KMESN2'] == 1) & (df['Filtro1-4KMESN'] != 4) & _col_eq_1('3SEASN'),
+            (df['1-4KMESN2'] == 1) & (df['Filtro1-4KMESN'] != 4) & _col_eq_1('4SEASN'),
+            (df['1-4KMESN2'] == 1) & (df['Filtro1-4KMESN'] != 4) & _col_eq_1('5SEASN')
+        ],
+        [1, 2, 3, 4, 5], default=0
+    )
+
+    sc_cols = ['seccionada_correcta_1', 'seccionada_correcta_2', 'seccionada_correcta_3', 'seccionada_correcta_4']
 
     # ── 12. sec_c / sec_e / sec_ea ───────────────────────────────────────────
     cols_c = [k for k in {**all_n, **all_sn} if get_tipo_servicio(k) == 'C' and not is_sr(k)]
@@ -350,9 +380,9 @@ def process_pba_jn(df1: pd.DataFrame,
     build_sec_flags(df, cols_c, cols_e, cols_ea)
 
     # km&p flags
-    kmp_c = [k for k in {**kp_n, **kp_sn, **km2_n, **km2_sn} if get_tipo_servicio(k) == 'C']
-    kmp_e = [k for k in {**kp_n, **kp_sn, **km2_n, **km2_sn} if get_tipo_servicio(k) == 'E']
-    kmp_ea = [k for k in {**kp_n, **kp_sn, **km2_n, **km2_sn} if get_tipo_servicio(k) == 'EA']
+    kmp_c = [k for k in {**kp_n, **kp_sn} if get_tipo_servicio(k) == 'C'] + ['1-4KMCN2', '1-4KMCSN2']
+    kmp_e = [k for k in {**kp_n, **kp_sn} if get_tipo_servicio(k) == 'E'] + ['1-4KMEN2', '1-4KMESN2']
+    kmp_ea = [k for k in {**kp_n, **kp_sn} if get_tipo_servicio(k) == 'EA'] + ['1-4KMEAN2', '1-4KMEASN2']
 
     for col, group in [('km&p_c', kmp_c), ('km&p_e', kmp_e), ('km&p_ea', kmp_ea)]:
         ok = [c for c in group if c in df.columns]
@@ -362,8 +392,8 @@ def process_pba_jn(df1: pd.DataFrame,
     _build_compilado_ts(df, ['km&p_c', 'km&p_e', 'km&p_ea'], ['sec_c', 'sec_e', 'sec_ea'])
 
     # ── 14. norm_por_tarifa ──────────────────────────────────────────────────
-    all_n_cols = list(all_n.keys())
-    all_sn_cols = list(all_sn.keys())
+    all_n_cols = list(all_n.keys()) + ['1-4KMCN2', '1-4KMEN2', '1-4KMEAN2']
+    all_sn_cols = list(all_sn.keys()) + ['1-4KMCSN2', '1-4KMESN2', '1-4KMEASN2']
     n_cols_for_norm = [c for c in all_n_cols if not is_sin_nominalizar(c)]
     build_norm_por_tarifa(df, cols_n=n_cols_for_norm, cols_sn=all_sn_cols)
 
@@ -388,7 +418,7 @@ def process_pba_jn(df1: pd.DataFrame,
         1, 0
     )
 
-    all_km_cols = [k for k in {**km_n, **km_sn, **km2_n, **km2_sn}]
+    all_km_cols = [k for k in {**km_n, **km_sn}] + ['1-4KMCN2', '1-4KMEN2', '1-4KMEAN2', '1-4KMCSN2', '1-4KMESN2', '1-4KMEASN2']
     ok_km = [c for c in all_km_cols if c in df.columns]
     df['tarifa_km'] = np.where(
         (df[ok_km].sum(axis=1) > 0 if ok_km else False) &
@@ -416,8 +446,7 @@ def process_pba_jn(df1: pd.DataFrame,
 
     # ── 17. Secciones 1-5 ────────────────────────────────────────────────────
     all_tarifa_cols = list({**all_n, **all_sn}.keys())
-    all_sr_existing = [c for c in all_sr_cols if c in df.columns]
-
+    
     def sec_cols_num(num):
         return [c for c in all_tarifa_cols if c.startswith(str(num)) and c in df.columns]
 
@@ -430,14 +459,14 @@ def process_pba_jn(df1: pd.DataFrame,
     build_seccionadas_final(df)
 
     # sec_1_4 para tipo KM
-    all_km_exact_range = [k for k in {**km_n, **km_sn, **km2_n, **km2_sn} if k in df.columns]
+    all_km_exact_range = [k for k in {**km_n, **km_sn} if k in df.columns] + [k for k in ['1-4KMCN2', '1-4KMEN2', '1-4KMEAN2', '1-4KMCSN2', '1-4KMESN2', '1-4KMEASN2'] if k in df.columns]
     df['sec_1_4'] = np.where(
         (df[all_km_exact_range].sum(axis=1) > 0 if all_km_exact_range else False) &
         (df[ok_sc].sum(axis=1) == 0 if ok_sc else True),
         4, 0
     )
 
-    # kilometricas_por_TS (mínimo no nulo de KP según TS)
+    # kilometricas_por_TS
     def min_kp_col(ts_val, sn_val):
         cands = [k for k in (kp_sn if sn_val else kp_n)
                  if get_tipo_servicio(k) == ts_val and k in df.columns]
@@ -494,7 +523,7 @@ def process_pba_jn(df1: pd.DataFrame,
                 sub_sec = f'{sec}-{i+1}'
                 mask = (
                     (df['TARIFA BASE ITG'] >= sub_lim_inf - 0.5) &
-                    (df['TARIFA BASE ITG'] < sub_lim_sup - 0.5) &
+                    (df['TARIFA BASE ITG'] < sub_lim_sup + 0.5) &
                     (df['PASES'] == 0) &
                     (df['sin_nominalizar'] == sn_val) &
                     (df['TipoServicio2'] == ts)
