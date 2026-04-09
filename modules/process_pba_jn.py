@@ -37,6 +37,8 @@ def _apply_km2_range(df: pd.DataFrame, tarifas: dict, sin_nom_val: int,
     """
     Aplica tarifas KM2 (rango intermedio entre KM y KP).
     Excluye filas que ya cayeron en seccionadas simples, LP, o SR.
+    *MODIFICACIÓN: Se elimina la validación de TipoServicio2 por 
+    criterio de negocio, replicando el barrido del código original.
     """
     base_mask = (
         (df['PASES'] == 0) &
@@ -61,15 +63,14 @@ def _apply_km2_range(df: pd.DataFrame, tarifas: dict, sin_nom_val: int,
         mask = (
             base_mask &
             (df['TARIFA BASE ITG'] >= lim_inf - 0.5) &
-            (df['TARIFA BASE ITG'] <= lim_sup) &
-            (df['TipoServicio2'] == ts) &
+            (df['TARIFA BASE ITG'] < lim_sup + 0.5) &
+            # LA SIGUIENTE LÍNEA SE ELIMINÓ PARA REPLICAR EL CÓDIGO ORIGINAL:
+            # (df['TipoServicio2'] == ts) &  
             (df['GT'] != 'DF') &
             ((df[exclude_ok].sum(axis=1) == 0) if exclude_ok else True)
         )
         df[id_val] = np.where(mask, 1, 0)
     return df
-
-
 def _build_filtro_km(df: pd.DataFrame, tarifas_km2: dict,
                       tarifas_km2_sn: dict,
                       all_cols_n: dict, all_cols_sn: dict) -> pd.DataFrame:
