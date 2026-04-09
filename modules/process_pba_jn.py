@@ -474,26 +474,40 @@ def process_pba_jn(df1: pd.DataFrame,
     )
 
     # ── 20. SubSeccion (para KP) ─────────────────────────────────────────────
-    df['SubSeccion'] = None
-    for sn_val, kp_dict in [(0, kp_n), (1, kp_sn)]:
-        for id_val, (lim_inf, lim_sup) in kp_dict.items():
-            ts = get_tipo_servicio(id_val)
-            sec = get_kp_seccion(id_val)
-            sub_rangos = np.linspace(lim_inf, lim_sup, 4)
-            for i in range(3):
-                sub_lim_inf = sub_rangos[i]
-                sub_lim_sup = sub_rangos[i + 1]
-                sub_sec = f'{sec}-{i+1}'
+   # ── 20. SUBSECCIONES (CORRECCIÓN DE TIPOS Y RANGOS) ───────────────────────
+
+    # 1. Blindaje de Tipos de Datos (Type Coercion)
+    # Evita que Streamlit evalúe '1.0' (float) o "1" (str) de manera distinta al entero 1
+    df['sin_nominalizar'] = pd.to_numeric(df['sin_nominalizar'], errors='coerce').fillna(0).astype(int)
+    df['PASES'] = pd.to_numeric(df['PASES'], errors='coerce').fillna(0).astype(int)
+    df['TARIFA BASE ITG'] = pd.to_numeric(df['TARIFA BASE ITG'], errors='coerce')
+
+    # 2. Iteración y Aplicación de Máscara (con Ajuste de Tolerancia)
+    # Asegúrate de iterar sobre ambas condiciones (0 y 1). 
+    # Ajusta 'diccionario_nominalizados' y 'diccionario_no_nominalizados' a las variables reales que importas de tus Excel de febrero.
+    
+    config_tarifas = [
+        (0, diccionario_nominalizados), 
+        (1, diccionario_no_nominalizados)
+    ]
+
+    for sn_val, tarifas_dict in config_tarifas:
+        for ts, sub_secciones in tarifas_dict.items():
+            for sub_sec, (sub_lim_inf, sub_lim_sup) in sub_secciones.items():
+                
+                # CORRECCIÓN CRÍTICA: Cambiamos "sub_lim_sup - 0.5" por "sub_lim_sup + 0.5"
+                # Esto atrapa valores como 1559.6, 1532.48 o 1614.2 sin que se desborden de la sección.
                 mask = (
                     (df['TARIFA BASE ITG'] >= sub_lim_inf - 0.5) &
-                    (df['TARIFA BASE ITG'] < sub_lim_sup - 0.5) &
+                    (df['TARIFA BASE ITG'] < sub_lim_sup + 0.5) & 
                     (df['PASES'] == 0) &
                     (df['sin_nominalizar'] == sn_val) &
                     (df['TipoServicio2'] == ts)
                 )
                 df.loc[mask, 'SubSeccion'] = sub_sec
-    df['SubSeccion'] = df['SubSeccion'].fillna(df['final_seccion'].astype(str))
 
+    # 3. Relleno de las secciones restantes
+    df['SubSeccion'] = df['SubSeccion'].fillna(df['final_seccion'].astype(str))
     # ── 21. CONCAT y merge TTR ───────────────────────────────────────────────
     build_concat_macheo(df, year=year, resolucion=resolucion)
 
