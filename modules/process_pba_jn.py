@@ -61,7 +61,7 @@ def _apply_km2_range(df: pd.DataFrame, tarifas: dict, sin_nom_val: int,
         mask = (
             base_mask &
             (df['TARIFA BASE ITG'] >= lim_inf - 0.5) &
-            (df['TARIFA BASE ITG'] <= lim_sup - 0.5) &
+            (df['TARIFA BASE ITG'] <= lim_sup) &
             (df['TipoServicio2'] == ts) &
             (df['GT'] != 'DF') &
             ((df[exclude_ok].sum(axis=1) == 0) if exclude_ok else True)
