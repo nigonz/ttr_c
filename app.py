@@ -2,6 +2,7 @@
 app.py
 ------
 Aplicación TTR — Cálculo automático de tarifas DF / PBA / JN
++ Liquidación de Compensaciones ITG DMK
 Streamlit app que reemplaza los 3 notebooks con tarifas dinámicas desde Excel.
 """
 
@@ -10,7 +11,7 @@ import sys
 import os
 import traceback
 
-
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -20,7 +21,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 from modules.tariff_loader import load_tarifas, get_filtro1_threshold
 from modules.process_df import process_df
 from modules.process_pba_jn import process_pba_jn
-from modules.tarifas_module import render_tarifas_tab
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -91,18 +91,10 @@ def show_stats(df: pd.DataFrame, label: str):
     with cols[2]:
         if 'Recaudacion_TRSUBE' in df.columns:
             st.metric("Recaudación TRSUBE", f"${df['Recaudacion_TRSUBE'].sum():,.0f}")
-    
-    # ── CAMBIO AQUÍ: Ahora suma la columna CANTIDAD_USOS ────────────────────
     with cols[3]:
-        if 'final_seccion' in df.columns and 'CANTIDAD_USOS' in df.columns:
-            # Filtramos los que tienen seccion 0 y sumamos sus usos
-            usos_no_clasificados = df[df['final_seccion'] == 0]['CANTIDAD_USOS'].sum()
-            
-            st.metric(
-                "Usos no clasificados (sec=0)", 
-                f"{usos_no_clasificados:,.0f}", 
-                delta_color="inverse"
-            )
+        if 'final_seccion' in df.columns:
+            unclassified = (df['final_seccion'] == 0).sum()
+            st.metric("Sin clasificar (sec=0)", f"{unclassified:,}", delta_color="inverse")
 
 
 def sidebar_config():
@@ -337,15 +329,207 @@ def tab_jn(year, resolucion):
                     st.code(traceback.format_exc())
 
 
+# ────────────────────────────────────────────────────────────────────────────────
+#  Tab ITG DMK — Liquidación de Compensaciones
+# ────────────────────────────────────────────────────────────────────────────────
+
+def _calcular_comp_ats(row):
+    """Lógica exacta del notebook para COMP. ATS (con redondeo a 2 decimales)."""
+    if row["CONTRATO"] != 621:
+        return 0
+    if row["GT"] == "INP":
+        return round((row["DEBITADO"] / 0.45 * 0.55) * row["CANTIDAD_USOS"], 2)
+    return round(
+        (row["TARIFA BASE ITG"] - row["DEBITADO"] - row["DESCUENTO X INTEGRACION"])
+        * row["CANTIDAD_USOS"],
+        2,
+    )
+
+
+def _procesar_itg_dmk(file_dggi, file_nomenclador, file_pme):
+    """
+    Replica celda a celda el notebook entrega_dggi__ITG_DMK.
+    Devuelve df_final listo para descargar.
+    """
+    # ── Carga ────────────────────────────────────────────────────────────────
+    df = pd.read_csv(file_dggi, encoding="ISO-8859-1", delimiter=";")
+    nom_gt = pd.read_excel(file_nomenclador)
+    df_pme = pd.read_excel(file_pme)
+
+    # ── Filtrar líneas presentes en nom_gt ───────────────────────────────────
+    df_ = df[df["ID_LINEA"].isin(nom_gt["ID_LINEA"])]
+
+    df_ramal = [
+        "ID_EMPRESA", "ID_LINEA", "RAMAL", "DOMINIO", "MK",
+        "TARIFA BASE ITG", "DEBITADO", "CONTRATO",
+        "VIAJE INTEGRADO", "DESCUENTO X INTEGRACION",
+        "CANTIDAD_USOS", "MONTO", "TOTAL DESC POR INTEGRACION",
+    ]
+    df_ = df_[df_ramal]
+
+    # ── Merge con nomenclador ────────────────────────────────────────────────
+    columns_to_merge = ["ID_LINEA", "GT", "Linea SILAS DNGFF", "PROVINCIA", "MUNICIPIO"]
+    _df2_ = pd.merge(df_, nom_gt[columns_to_merge], how="left", on="ID_LINEA")
+
+    # ── Columna BE ───────────────────────────────────────────────────────────
+    _df2_["BE"] = np.where(
+        _df2_["CONTRATO"].isin([830, 831, 832, 833]), "SI", "NO"
+    )
+
+    # ── Corrección PROVINCIA para GT == 'DF' ─────────────────────────────────
+    _df2_.loc[_df2_["GT"] == "DF", "PROVINCIA"] = "CABA"
+
+    # ── Split: con / sin Parque Móvil Energías ───────────────────────────────
+    dominios_pme = df_pme["DOMINIO"].unique()
+
+    df_pm = _df2_[_df2_["DOMINIO"].isin(dominios_pme)].copy()
+    df_resto = _df2_[~_df2_["DOMINIO"].isin(dominios_pme)].copy()
+
+    # Traer columna ENERGIA desde df_pme
+    df_pm = df_pm.merge(
+        df_pme[["DOMINIO", "ENERGIA"]].drop_duplicates(),
+        on="DOMINIO",
+        how="left",
+    )
+
+    # Quitar DOMINIO y MK de df_resto
+    df_resto = df_resto.drop(columns=["DOMINIO", "MK"])
+
+    # ── Groupby df_pm ────────────────────────────────────────────────────────
+    df_pm = df_pm.groupby(
+        [
+            "PROVINCIA", "MUNICIPIO", "ID_EMPRESA", "GT",
+            "Linea SILAS DNGFF", "ID_LINEA", "RAMAL",
+            "DOMINIO", "ENERGIA",
+            "CONTRATO", "TARIFA BASE ITG", "DEBITADO",
+            "VIAJE INTEGRADO", "DESCUENTO X INTEGRACION",
+        ],
+        as_index=False,
+    ).agg({"CANTIDAD_USOS": "sum", "MONTO": "sum"})
+
+    # ── Groupby df_resto → _df_ ──────────────────────────────────────────────
+    _df_ = df_resto.groupby(
+        [
+            "PROVINCIA", "MUNICIPIO", "ID_EMPRESA", "GT",
+            "Linea SILAS DNGFF", "ID_LINEA", "RAMAL",
+            "CONTRATO", "TARIFA BASE ITG", "DEBITADO",
+            "VIAJE INTEGRADO", "DESCUENTO X INTEGRACION",
+        ],
+        as_index=False,
+    ).agg({"CANTIDAD_USOS": "sum", "MONTO": "sum"})
+
+    # ── Cálculos df_pm ───────────────────────────────────────────────────────
+    for col in ["TARIFA BASE ITG", "DEBITADO", "DESCUENTO X INTEGRACION",
+                "CANTIDAD_USOS", "CONTRATO"]:
+        df_pm[col] = pd.to_numeric(df_pm[col], errors="coerce")
+
+    df_pm["TipoContrato"] = df_pm["CONTRATO"].apply(
+        lambda x: "ATS" if x == 621 else "SIN ATS"
+    )
+    df_pm["COMP. ITG"] = (
+        df_pm["DESCUENTO X INTEGRACION"] * df_pm["CANTIDAD_USOS"]
+    ).round(2)
+    df_pm["COMP. ATS"] = df_pm.apply(_calcular_comp_ats, axis=1)
+    df_pm["COMP. ATS s/IVA"] = (df_pm["COMP. ATS"] / 1.105).round(2)
+    df_pm["COMP. ITG s/IVA"] = (df_pm["COMP. ITG"] / 1.105).round(2)
+
+    # ── Cálculos _df_ ────────────────────────────────────────────────────────
+    for col in ["TARIFA BASE ITG", "DEBITADO", "DESCUENTO X INTEGRACION",
+                "CANTIDAD_USOS", "CONTRATO"]:
+        _df_[col] = pd.to_numeric(_df_[col], errors="coerce")
+
+    _df_["TipoContrato"] = _df_["CONTRATO"].apply(
+        lambda x: "ATS" if x == 621 else "SIN ATS"
+    )
+    _df_["COMP. ITG"] = (
+        _df_["DESCUENTO X INTEGRACION"] * _df_["CANTIDAD_USOS"]
+    ).round(2)
+    _df_["COMP. ATS"] = _df_.apply(_calcular_comp_ats, axis=1)
+    _df_["COMP. ATS s/IVA"] = (_df_["COMP. ATS"] / 1.105).round(2)
+    _df_["COMP. ITG s/IVA"] = (_df_["COMP. ITG"] / 1.105).round(2)
+
+    # ── Unión final ──────────────────────────────────────────────────────────
+    _df_["DOMINIO"] = "NO"
+    _df_["ENERGIA"] = 3
+
+    df_final = pd.concat([_df_, df_pm], ignore_index=True)
+    return df_final
+
+
+def tab_itg_dmk():
+    st.header("📋 ITG DMK — Liquidación de Compensaciones")
+    st.info(
+        "Replica el proceso del notebook **entrega_dggi__ITG_DMK**. "
+        "Cargá los tres archivos del período y descargá el Excel resultante."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        f_dggi = st.file_uploader(
+            "📂 DGGI Tarifa ITG  (CSV · sep `;` · ISO-8859-1)",
+            type=["csv"],
+            key="itg_dggi",
+        )
+    with c2:
+        f_nomenclador = st.file_uploader(
+            "📂 Nomenclador  (.xlsx)",
+            type=["xlsx"],
+            key="itg_nomenclador",
+        )
+    with c3:
+        f_pme = st.file_uploader(
+            "📂 Parque Móvil – Energías  (.xlsx)",
+            type=["xlsx"],
+            key="itg_pme",
+        )
+
+    if st.button("🚀 Procesar ITG DMK", type="primary", key="btn_itg"):
+        if not all([f_dggi, f_nomenclador, f_pme]):
+            st.error("⚠️ Por favor cargá los tres archivos antes de procesar.")
+            return
+
+        with st.spinner("Procesando…"):
+            try:
+                df_final = _procesar_itg_dmk(f_dggi, f_nomenclador, f_pme)
+
+                st.success(f"✅ Proceso ITG DMK completado. {len(df_final):,} registros.")
+
+                # Métricas
+                cols = st.columns(4)
+                cols[0].metric("Registros", f"{len(df_final):,}")
+                cols[1].metric("MONTO", f"${df_final['MONTO'].sum():,.2f}")
+                cols[2].metric("COMP. ITG", f"${df_final['COMP. ITG'].sum():,.2f}")
+                cols[3].metric("COMP. ATS", f"${df_final['COMP. ATS'].sum():,.2f}")
+
+                # Vista previa
+                with st.expander("👁️ Vista previa (primeras 100 filas)"):
+                    st.dataframe(df_final.head(100), use_container_width=True)
+
+                # Descarga
+                xlsx_bytes = to_excel_bytes(df_final, sheet_name="ITG_DMK")
+                st.download_button(
+                    label="⬇️ Descargar resultado ITG DMK (.xlsx)",
+                    data=xlsx_bytes,
+                    file_name="dggi_DMK_PME.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+            except Exception as e:
+                st.error(f"❌ Error durante el procesamiento:\n\n{e}")
+                with st.expander("Traceback"):
+                    st.code(traceback.format_exc())
+
+
 def tab_ayuda():
     st.header("📖 Guía de uso")
     st.markdown("""
 ### ¿Qué hace esta aplicación?
 
-Automatiza los 3 procesos de ingeniería inversa de tarifas TTR:
+Automatiza los 3 procesos de ingeniería inversa de tarifas TTR + la liquidación de compensaciones ITG DMK:
 - **DF** → Distrito Federal (GT = DF)
 - **PBA** → Provincia de Buenos Aires (GT = UPA, UPAKM, UMA1, UMA2)
 - **JN** → Jornada Nacional (GT = SGI, SGII, SGIKM)
+- **ITG DMK** → Liquidación de Compensaciones (replica el notebook `entrega_dggi__ITG_DMK`)
 
 En lugar de tipear las tarifas a mano en el código cada período, la app **las lee del Excel de tarifas** que te compartieron.
 
@@ -360,6 +544,14 @@ En lugar de tipear las tarifas a mano en el código cada período, la app **las 
 | **Nomenclador GT** | `00. NOMENCLADOR.v2.xlsx` |
 | **Diccionario de Tarifas** | El Excel de tarifas del período (DF, PBA o JN) |
 | **TTR Teórica Resoluciones** | `03. TTR TEORICA RESOLUCIONES.xlsx` |
+
+#### Archivos para ITG DMK
+
+| Archivo | Descripción |
+|---------|-------------|
+| **DGGI Tarifa ITG** | CSV con separador `;` y encoding ISO-8859-1 (ej. `Entrega_dggi_tarifa_ITG_202603.csv`) |
+| **Nomenclador** | `00. NOMENCLADOR.v2.xlsx` |
+| **Parque Móvil – Energías** | `09. PARQUE MOVIL - ENERGIAS.xlsx` |
 
 ---
 
@@ -393,6 +585,9 @@ En el panel lateral podés configurar:
 El archivo de salida `.xlsx` replica exactamente la estructura del notebook original,
 con todas las columnas de clasificación (`sec_c`, `sec_e`, `final_seccion`, `compilado_ts`,
 `norm_por_tarifa`, `CONCAT_MACHEO`, `Tarifa TRSUBE`, `Recaudacion_TRSUBE`, etc.).
+
+El resultado de **ITG DMK** incluye: `TipoContrato`, `COMP. ITG`, `COMP. ATS`,
+`COMP. ATS s/IVA`, `COMP. ITG s/IVA` — todos redondeados a 2 decimales.
     """)
 
 
@@ -403,32 +598,26 @@ con todas las columnas de clasificación (`sec_c`, `sec_e`, `final_seccion`, `co
 def main():
     st.title("🚌 TTR — Calculadora Automática de Tarifas")
     st.markdown(
-        "Procesá **DF**, **PBA** y **JN** cargando los archivos del período. "
+        "Procesá **DF**, **PBA**, **JN** e **ITG DMK** cargando los archivos del período. "
         "Las tarifas se leen del Excel de tarifas — **sin hardcodeo**."
     )
 
     year, resolucion = sidebar_config()
 
-    # Reordenamos la lista: Tarifas ahora es la primera (índice 0)
-    tabs = st.tabs(["📊 Tarifas", "🏙️ DF", "🌿 PBA", "🚌 JN", "📖 Ayuda"])
+    tabs = st.tabs(["🏙️ DF", "🌿 PBA", "🚌 JN", "📋 ITG DMK", "📖 Ayuda"])
 
-    # --- ÍNDICE 0: TARIFAS ---
     with tabs[0]:
-        render_tarifas_tab()
-
-    # --- ÍNDICE 1: DF ---
-    with tabs[1]:
         tab_df(year, resolucion)
 
-    # --- ÍNDICE 2: PBA ---
-    with tabs[2]:
+    with tabs[1]:
         tab_pba(year, resolucion)
 
-    # --- ÍNDICE 3: JN ---
-    with tabs[3]:
+    with tabs[2]:
         tab_jn(year, resolucion)
 
-    # --- ÍNDICE 4: AYUDA ---
+    with tabs[3]:
+        tab_itg_dmk()
+
     with tabs[4]:
         tab_ayuda()
 
