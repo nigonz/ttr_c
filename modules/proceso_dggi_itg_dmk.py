@@ -107,10 +107,10 @@ def run():
                     "Linea SILAS DNGFF", "ID_LINEA", "RAMAL",
                     "DOMINIO", "ENERGIA",
                     "CONTRATO", "TARIFA BASE ITG", "DEBITADO",
-                    "VIAJE INTEGRADO", "DESCUENTO X INTEGRACION",
+                    "DESCUENTO X INTEGRACION",
                 ],
                 as_index=False,
-            ).agg({"CANTIDAD_USOS": "sum", "MONTO": "sum"})
+            ).agg({"CANTIDAD_USOS": "sum", "MONTO": "sum", "VIAJE INTEGRADO": "first"})
 
             # Groupby df_resto → _df_
             _df_ = df_resto.groupby(
@@ -118,10 +118,10 @@ def run():
                     "PROVINCIA", "MUNICIPIO", "ID_EMPRESA", "GT",
                     "Linea SILAS DNGFF", "ID_LINEA", "RAMAL",
                     "CONTRATO", "TARIFA BASE ITG", "DEBITADO",
-                    "VIAJE INTEGRADO", "DESCUENTO X INTEGRACION",
+                    "DESCUENTO X INTEGRACION",
                 ],
                 as_index=False,
-            ).agg({"CANTIDAD_USOS": "sum", "MONTO": "sum"})
+            ).agg({"CANTIDAD_USOS": "sum", "MONTO": "sum", "VIAJE INTEGRADO": "first"})
 
             # ─────────────────────────────────────────────
             # CALCULOS df_pm
@@ -227,6 +227,92 @@ def run():
                 data=output,
                 file_name="dggi_DMK_PME.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            # ─────────────────────────────────────────────
+            # RESUMEN EN PANTALLA
+            # ─────────────────────────────────────────────
+            st.subheader("5. Resumen por GT — Recuento distinto de Líneas, ID_LINEA y Ramales")
+
+            resumen_gt = (
+                df_final.groupby("GT")
+                .agg(
+                    Lineas_Distintas=("Linea SILAS DNGFF", "nunique"),
+                    ID_LINEA_Distintos=("ID_LINEA", "nunique"),
+                    Ramales_Distintos=("RAMAL", "nunique"),
+                )
+                .reset_index()
+            )
+
+            total_gt = pd.DataFrame([{
+                "GT": "Total general",
+                "Lineas_Distintas": df_final["Linea SILAS DNGFF"].nunique(),
+                "ID_LINEA_Distintos": df_final["ID_LINEA"].nunique(),
+                "Ramales_Distintos": df_final["RAMAL"].nunique(),
+            }])
+            resumen_gt = pd.concat([resumen_gt, total_gt], ignore_index=True)
+            resumen_gt.columns = [
+                "GT",
+                "Rec. Dist. Línea SILAS DNGFF",
+                "Rec. Dist. ID_LINEA",
+                "Rec. Dist. RAMAL",
+            ]
+
+            def bold_total_row(row):
+                style = "font-weight: bold; background-color: #e8e8e8"
+                return [style if row["GT"] == "Total general" else "" for _ in row]
+
+            st.dataframe(
+                resumen_gt.style.apply(bold_total_row, axis=1),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.subheader("6. Resumen por Provincia y GT — Usos, Monto y Compensaciones s/IVA")
+
+            resumen_prov = (
+                df_final.groupby(["PROVINCIA", "GT"])
+                .agg(
+                    Suma_Usos=("CANTIDAD_USOS", "sum"),
+                    Suma_Monto=("MONTO", "sum"),
+                    Suma_COMP_ATS=("COMP. ATS s/IVA", "sum"),
+                    Suma_COMP_ITG=("COMP. ITG s/IVA", "sum"),
+                )
+                .reset_index()
+            )
+
+            total_prov = pd.DataFrame([{
+                "PROVINCIA": "Total general",
+                "GT": "",
+                "Suma_Usos": df_final["CANTIDAD_USOS"].sum(),
+                "Suma_Monto": df_final["MONTO"].sum(),
+                "Suma_COMP_ATS": df_final["COMP. ATS s/IVA"].sum(),
+                "Suma_COMP_ITG": df_final["COMP. ITG s/IVA"].sum(),
+            }])
+            resumen_prov = pd.concat([resumen_prov, total_prov], ignore_index=True)
+            resumen_prov.columns = [
+                "PROVINCIA", "GT",
+                "Suma CANTIDAD_USOS",
+                "Suma MONTO",
+                "Suma COMP. ATS s/IVA",
+                "Suma COMP. ITG s/IVA",
+            ]
+
+            def bold_total_prov(row):
+                style = "font-weight: bold; background-color: #e8e8e8"
+                return [style if row["PROVINCIA"] == "Total general" else "" for _ in row]
+
+            st.dataframe(
+                resumen_prov.style
+                .apply(bold_total_prov, axis=1)
+                .format({
+                    "Suma CANTIDAD_USOS": "{:,.0f}",
+                    "Suma MONTO": "${:,.2f}",
+                    "Suma COMP. ATS s/IVA": "${:,.2f}",
+                    "Suma COMP. ITG s/IVA": "${:,.2f}",
+                }),
+                use_container_width=True,
+                hide_index=True,
             )
 
         except Exception as exc:
